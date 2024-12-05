@@ -7,6 +7,8 @@ const {
   verifySession,
 } = require("../../middleware/auth.middleware");
 
+const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
+
 /**
  * @swagger
  * /api/auth/magic-link:
@@ -80,11 +82,11 @@ router.get(
 router.get(
   "/google/callback",
   passport.authenticate("google", {
-    failureRedirect: "/login",
+    failureRedirect: `${FRONTEND_URL}/login`,
     session: true,
   }),
   (req, res) => {
-    res.redirect("/dashboard");
+    res.redirect(`${FRONTEND_URL}/dashboard`);
   }
 );
 
@@ -118,11 +120,11 @@ router.get(
 router.post(
   "/microsoft/callback",
   passport.authenticate("azure", {
-    failureRedirect: "/login",
+    failureRedirect: `${FRONTEND_URL}/login`,
     session: true,
   }),
   (req, res) => {
-    res.redirect("/dashboard");
+    res.redirect(`${FRONTEND_URL}/dashboard`);
   }
 );
 

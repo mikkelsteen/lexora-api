@@ -2,7 +2,7 @@ require("dotenv").config();
 
 module.exports = {
   jwt: {
-    secret: process.env.JWT_SECRET || "your-secret-key",
+    secret: process.env.JWT_SECRET,
     expiresIn: "1d",
     refreshExpiresIn: "7d",
   },
@@ -18,7 +18,7 @@ module.exports = {
     tenant: process.env.MICROSOFT_TENANT_ID,
   },
   email: {
-    from: process.env.EMAIL_FROM || "noreply@yourdomain.com",
+    from: process.env.EMAIL_FROM || "noreply@lexora.io",
     host: process.env.EMAIL_HOST,
     port: process.env.EMAIL_PORT,
     secure: process.env.EMAIL_SECURE === "true",
@@ -31,7 +31,7 @@ module.exports = {
     expiresIn: "15m",
   },
   session: {
-    secret: process.env.SESSION_SECRET || "your-session-secret",
+    secret: process.env.SESSION_SECRET,
     cookie: {
       maxAge: 24 * 60 * 60 * 1000, // 24 hours
     },

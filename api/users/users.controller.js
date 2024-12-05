@@ -1,16 +1,29 @@
 const pool = require("../../db");
 const bcrypt = require("bcrypt");
+const {
+  successResponse,
+  AppError,
+  ServiceErrorTypes,
+} = require("../../utils/response.handler");
 
 /**
  * @desc    Create a new user
  * @route   POST /api/users
  * @access  Admin
  */
-const createUser = async (req, res) => {
+const createUser = async (req, res, next) => {
   const { email, firstName, lastName, password, organizationId } = req.body;
   const client = await pool.connect();
 
   try {
+    if (!email) {
+      throw new AppError(
+        "Email is required",
+        ServiceErrorTypes.VALIDATION_ERROR,
+        400
+      );
+    }
+
     await client.query("BEGIN");
 
     // Check if user exists
@@ -20,7 +33,11 @@ const createUser = async (req, res) => {
     );
 
     if (existingUser.rows.length > 0) {
-      return res.status(400).json({ message: "User already exists" });
+      throw new AppError(
+        "User already exists",
+        ServiceErrorTypes.VALIDATION_ERROR,
+        400
+      );
     }
 
     // If password provided, hash it
@@ -53,11 +70,12 @@ const createUser = async (req, res) => {
     );
 
     await client.query("COMMIT");
-    res.status(201).json(result.rows[0]);
+    res
+      .status(201)
+      .json(successResponse(result.rows[0], "User created successfully"));
   } catch (error) {
     await client.query("ROLLBACK");
-    console.error("Create user error:", error);
-    res.status(500).json({ message: "Error creating user" });
+    next(error);
   } finally {
     client.release();
   }
@@ -68,11 +86,29 @@ const createUser = async (req, res) => {
  * @route   GET /api/users
  * @access  Admin
  */
-const getUsers = async (req, res) => {
+const getUsers = async (req, res, next) => {
   const { page = 1, limit = 10, search, organizationId } = req.query;
-  const offset = (page - 1) * limit;
 
   try {
+    const pageNum = parseInt(page, 10);
+    const limitNum = parseInt(limit, 10);
+
+    if (isNaN(pageNum) || pageNum < 1) {
+      throw new AppError(
+        "Invalid page number",
+        ServiceErrorTypes.VALIDATION_ERROR,
+        400
+      );
+    }
+    if (isNaN(limitNum) || limitNum < 1) {
+      throw new AppError(
+        "Invalid limit number",
+        ServiceErrorTypes.VALIDATION_ERROR,
+        400
+      );
+    }
+
+    const offset = (pageNum - 1) * limitNum;
     let query = `
       SELECT 
         u.id,
@@ -112,21 +148,22 @@ const getUsers = async (req, res) => {
     query += ` ORDER BY u.created_at DESC LIMIT $${paramCount} OFFSET $${
       paramCount + 1
     }`;
-    queryParams.push(limit, offset);
+    queryParams.push(limitNum, offset);
 
     const result = await pool.query(query, queryParams);
 
-    res.json({
-      users: result.rows,
-      pagination: {
-        total: parseInt(result.rows[0]?.total_count || 0),
-        page: parseInt(page),
-        limit: parseInt(limit),
-      },
-    });
+    res.json(
+      successResponse({
+        users: result.rows,
+        pagination: {
+          total: parseInt(result.rows[0]?.total_count || 0),
+          page: pageNum,
+          limit: limitNum,
+        },
+      })
+    );
   } catch (error) {
-    console.error("Get users error:", error);
-    res.status(500).json({ message: "Error fetching users" });
+    next(error);
   }
 };
 
@@ -135,10 +172,18 @@ const getUsers = async (req, res) => {
  * @route   GET /api/users/:id
  * @access  Admin or Self
  */
-const getUserById = async (req, res) => {
+const getUserById = async (req, res, next) => {
   const { id } = req.params;
 
   try {
+    if (!id) {
+      throw new AppError(
+        "User ID is required",
+        ServiceErrorTypes.VALIDATION_ERROR,
+        400
+      );
+    }
+
     const result = await pool.query(
       `
       SELECT 
@@ -164,13 +209,12 @@ const getUserById = async (req, res) => {
     );
 
     if (result.rows.length === 0) {
-      return res.status(404).json({ message: "User not found" });
+      throw new AppError("User not found", ServiceErrorTypes.NOT_FOUND, 404);
     }
 
-    res.json(result.rows[0]);
+    res.json(successResponse(result.rows[0]));
   } catch (error) {
-    console.error("Get user error:", error);
-    res.status(500).json({ message: "Error fetching user" });
+    next(error);
   }
 };
 
@@ -179,13 +223,21 @@ const getUserById = async (req, res) => {
  * @route   PUT /api/users/:id
  * @access  Admin or Self
  */
-const updateUser = async (req, res) => {
+const updateUser = async (req, res, next) => {
   const { id } = req.params;
   const { email, firstName, lastName, password, isActive, organizationId } =
     req.body;
   const client = await pool.connect();
 
   try {
+    if (!id) {
+      throw new AppError(
+        "User ID is required",
+        ServiceErrorTypes.VALIDATION_ERROR,
+        400
+      );
+    }
+
     await client.query("BEGIN");
 
     // If email is being updated, check for duplicates
@@ -196,7 +248,11 @@ const updateUser = async (req, res) => {
       );
 
       if (existingUser.rows.length > 0) {
-        return res.status(400).json({ message: "Email already in use" });
+        throw new AppError(
+          "Email already in use",
+          ServiceErrorTypes.VALIDATION_ERROR,
+          400
+        );
       }
     }
 
@@ -251,15 +307,14 @@ const updateUser = async (req, res) => {
     const result = await client.query(updateQuery, queryParams);
 
     if (result.rows.length === 0) {
-      return res.status(404).json({ message: "User not found" });
+      throw new AppError("User not found", ServiceErrorTypes.NOT_FOUND, 404);
     }
 
     await client.query("COMMIT");
-    res.json(result.rows[0]);
+    res.json(successResponse(result.rows[0], "User updated successfully"));
   } catch (error) {
     await client.query("ROLLBACK");
-    console.error("Update user error:", error);
-    res.status(500).json({ message: "Error updating user" });
+    next(error);
   } finally {
     client.release();
   }
@@ -270,11 +325,19 @@ const updateUser = async (req, res) => {
  * @route   DELETE /api/users/:id
  * @access  Admin
  */
-const deleteUser = async (req, res) => {
+const deleteUser = async (req, res, next) => {
   const { id } = req.params;
   const client = await pool.connect();
 
   try {
+    if (!id) {
+      throw new AppError(
+        "User ID is required",
+        ServiceErrorTypes.VALIDATION_ERROR,
+        400
+      );
+    }
+
     await client.query("BEGIN");
 
     // Delete user's team memberships
@@ -293,15 +356,14 @@ const deleteUser = async (req, res) => {
     );
 
     if (result.rows.length === 0) {
-      return res.status(404).json({ message: "User not found" });
+      throw new AppError("User not found", ServiceErrorTypes.NOT_FOUND, 404);
     }
 
     await client.query("COMMIT");
-    res.json({ message: "User deleted successfully" });
+    res.json(successResponse(null, "User deleted successfully"));
   } catch (error) {
     await client.query("ROLLBACK");
-    console.error("Delete user error:", error);
-    res.status(500).json({ message: "Error deleting user" });
+    next(error);
   } finally {
     client.release();
   }

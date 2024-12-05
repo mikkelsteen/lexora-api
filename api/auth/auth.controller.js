@@ -4,6 +4,15 @@ const nodemailer = require("nodemailer");
 const crypto = require("crypto");
 const pool = require("../../db");
 const authConfig = require("../../config/auth.config");
+const {
+  successResponse,
+  errorResponse,
+  ServiceErrorTypes,
+  AppError,
+} = require("../../utils/response.handler");
+
+// Store for recently used tokens to prevent multiple verifications
+const recentlyUsedTokens = new Map();
 
 // Email transporter
 const transporter = nodemailer.createTransport(authConfig.email);
@@ -27,39 +36,77 @@ const generateTokens = async (userId) => {
 };
 
 // Magic Link Authentication
-const sendMagicLink = async (req, res) => {
+const sendMagicLink = async (req, res, next) => {
   const { email } = req.body;
 
   try {
+    console.log("Sending magic link for email:", email);
+
+    if (!email) {
+      throw new AppError(
+        "Email is required",
+        ServiceErrorTypes.VALIDATION_ERROR,
+        400
+      );
+    }
+
     // Check if user exists
     let result = await pool.query("SELECT * FROM users WHERE email = $1", [
       email,
     ]);
+
+    console.log("User lookup result:", result.rows);
+
     let user;
 
     if (result.rows.length === 0) {
+      console.log("Creating new user for email:", email);
       // Create new user
       result = await pool.query(
         "INSERT INTO users (email, auth_type) VALUES ($1, $2) RETURNING *",
         [email, "magic-link"]
       );
+      console.log("New user created:", result.rows[0]);
     }
     user = result.rows[0];
 
     // Generate magic link token
     const token = crypto.randomBytes(32).toString("hex");
     const expires = new Date();
-    expires.setMinutes(expires.getMinutes() + 15); // 15 minutes
+    expires.setHours(expires.getHours() + 1); // Increased to 1 hour for testing
 
-    await pool.query(
-      "INSERT INTO magic_link_tokens (user_id, token, expires_at) VALUES ($1, $2, $3)",
-      [user.id, token, expires]
-    );
+    console.log("Attempting to insert magic link token:", {
+      userId: user.id,
+      token: token,
+      expiresAt: expires,
+    });
+
+    try {
+      const insertResult = await pool.query(
+        "INSERT INTO magic_link_tokens (user_id, token, expires_at) VALUES ($1, $2, $3) RETURNING *",
+        [user.id, token, expires]
+      );
+      console.log(
+        "Successfully inserted magic link token:",
+        insertResult.rows[0]
+      );
+    } catch (dbError) {
+      console.error("Database error inserting token:", {
+        error: dbError,
+        sql: dbError.query,
+        parameters: dbError.parameters,
+      });
+      throw dbError;
+    }
 
     // Send magic link email
-    const magicLink = `${req.protocol}://${req.get(
-      "host"
-    )}/api/auth/verify-magic-link?token=${token}`;
+    const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
+    const magicLink = `${FRONTEND_URL}/auth/magic-link/callback?token=${token}`;
+
+    console.log("Sending magic link email:", {
+      to: email,
+      magicLink: magicLink,
+    });
 
     await transporter.sendMail({
       from: authConfig.email.from,
@@ -68,72 +115,169 @@ const sendMagicLink = async (req, res) => {
       html: `
         <p>Click the link below to sign in:</p>
         <a href="${magicLink}">Sign In</a>
-        <p>This link will expire in 15 minutes.</p>
+        <p>This link will expire in 1 hour.</p>
+        <p>Debug info: Token=${token}</p>
       `,
     });
 
-    res.json({ message: "Magic link sent successfully" });
+    console.log("Magic link email sent successfully");
+
+    res.json(
+      successResponse({
+        message: "Magic link sent successfully",
+        debug: {
+          token,
+          expiresAt: expires,
+        },
+      })
+    );
   } catch (error) {
-    console.error("Magic link error:", error);
-    res.status(500).json({ message: "Error sending magic link" });
+    console.error("Error in sendMagicLink:", {
+      error: error,
+      stack: error.stack,
+      email: email,
+    });
+    next(error);
   }
 };
 
 // Verify Magic Link
-const verifyMagicLink = async (req, res) => {
+const verifyMagicLink = async (req, res, next) => {
   const { token } = req.query;
 
   try {
-    const result = await pool.query(
-      `
-      SELECT t.*, u.id as user_id 
-      FROM magic_link_tokens t
-      INNER JOIN users u ON t.user_id = u.id
-      WHERE t.token = $1 AND t.expires_at > NOW()
-    `,
-      [token]
-    );
+    console.log("Verifying magic link token:", token);
 
-    if (result.rows.length === 0) {
-      return res.status(400).json({ message: "Invalid or expired token" });
+    if (!token) {
+      throw new AppError(
+        "Token is required",
+        ServiceErrorTypes.VALIDATION_ERROR,
+        400
+      );
     }
 
-    const user = result.rows[0];
+    // Check if token was recently used successfully
+    if (recentlyUsedTokens.has(token)) {
+      const userData = recentlyUsedTokens.get(token);
+      console.log(
+        "Token was recently used successfully, returning cached response"
+      );
+      return res.json(successResponse(userData, "Authentication successful"));
+    }
 
-    // Delete used token
-    await pool.query("DELETE FROM magic_link_tokens WHERE token = $1", [token]);
+    // First check if token exists
+    let tokenResult;
+    try {
+      tokenResult = await pool.query(
+        "SELECT t.*, u.email FROM magic_link_tokens t INNER JOIN users u ON t.user_id = u.id WHERE t.token = $1",
+        [token]
+      );
+      console.log("Token lookup result:", tokenResult.rows);
+    } catch (dbError) {
+      console.error("Database error looking up token:", {
+        error: dbError,
+        sql: dbError.query,
+        parameters: dbError.parameters,
+      });
+      throw dbError;
+    }
+
+    if (tokenResult.rows.length === 0) {
+      console.log("Token not found in database");
+      throw new AppError(
+        "Invalid or already used token",
+        ServiceErrorTypes.AUTH_ERROR,
+        401
+      );
+    }
+
+    const tokenData = tokenResult.rows[0];
+
+    // Then check if token is expired
+    const now = new Date();
+    const expiryDate = new Date(tokenData.expires_at);
+
+    console.log("Token expiry check:", {
+      now: now,
+      expiryDate: expiryDate,
+      isExpired: expiryDate < now,
+    });
+
+    if (expiryDate < now) {
+      throw new AppError(
+        `Token expired at ${tokenData.expires_at}`,
+        ServiceErrorTypes.AUTH_ERROR,
+        401
+      );
+    }
 
     // Generate JWT tokens
-    const tokens = await generateTokens(user.user_id);
+    const tokens = await generateTokens(tokenData.user_id);
+    console.log("Generated JWT tokens for user:", tokenData.user_id);
 
     // Update last login
-    await pool.query(
-      "UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = $1",
-      [user.user_id]
-    );
+    try {
+      await pool.query(
+        "UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = $1",
+        [tokenData.user_id]
+      );
+      console.log("Updated last login timestamp");
+    } catch (dbError) {
+      console.error("Error updating last login:", dbError);
+      // Continue even if update fails
+    }
+
+    // Delete used token
+    try {
+      await pool.query("DELETE FROM magic_link_tokens WHERE token = $1", [
+        token,
+      ]);
+      console.log("Token deleted successfully");
+    } catch (dbError) {
+      console.error("Error deleting token:", dbError);
+      // Continue even if delete fails
+    }
 
     // Set session
-    req.session.userId = user.user_id;
+    req.session.userId = tokenData.user_id;
 
-    res.json({
-      message: "Authentication successful",
+    // Create response data
+    const responseData = {
       ...tokens,
       user: {
-        id: user.user_id,
-        email: user.email,
+        id: tokenData.user_id,
+        email: tokenData.email,
       },
-    });
+    };
+
+    // Store token in recently used cache with a 5-minute expiry
+    recentlyUsedTokens.set(token, responseData);
+    setTimeout(() => recentlyUsedTokens.delete(token), 5 * 60 * 1000);
+
+    res.json(successResponse(responseData, "Authentication successful"));
   } catch (error) {
-    console.error("Magic link verification error:", error);
-    res.status(500).json({ message: "Error verifying magic link" });
+    console.error("Error in verifyMagicLink:", {
+      error: error,
+      stack: error.stack,
+      token: token,
+    });
+    next(error);
   }
 };
 
 // Refresh Token
-const refreshToken = async (req, res) => {
+const refreshToken = async (req, res, next) => {
   const { refreshToken } = req.body;
 
   try {
+    if (!refreshToken) {
+      throw new AppError(
+        "Refresh token is required",
+        ServiceErrorTypes.VALIDATION_ERROR,
+        400
+      );
+    }
+
     const result = await pool.query(
       `
       SELECT * FROM refresh_tokens 
@@ -143,9 +287,11 @@ const refreshToken = async (req, res) => {
     );
 
     if (result.rows.length === 0) {
-      return res
-        .status(401)
-        .json({ message: "Invalid or expired refresh token" });
+      throw new AppError(
+        "Invalid or expired refresh token",
+        ServiceErrorTypes.AUTH_ERROR,
+        401
+      );
     }
 
     const token = result.rows[0];
@@ -155,15 +301,14 @@ const refreshToken = async (req, res) => {
       expiresIn: authConfig.jwt.expiresIn,
     });
 
-    res.json({ accessToken });
+    res.json(successResponse({ accessToken }));
   } catch (error) {
-    console.error("Token refresh error:", error);
-    res.status(500).json({ message: "Error refreshing token" });
+    next(error);
   }
 };
 
 // Logout
-const logout = async (req, res) => {
+const logout = async (req, res, next) => {
   const { refreshToken } = req.body;
 
   try {
@@ -177,15 +322,14 @@ const logout = async (req, res) => {
     // Clear session
     req.session.destroy();
 
-    res.json({ message: "Logged out successfully" });
+    res.json(successResponse({ message: "Logged out successfully" }));
   } catch (error) {
-    console.error("Logout error:", error);
-    res.status(500).json({ message: "Error during logout" });
+    next(error);
   }
 };
 
 // Get Current User
-const getCurrentUser = async (req, res) => {
+const getCurrentUser = async (req, res, next) => {
   try {
     const result = await pool.query(
       `
@@ -211,13 +355,12 @@ const getCurrentUser = async (req, res) => {
     );
 
     if (result.rows.length === 0) {
-      return res.status(404).json({ message: "User not found" });
+      throw new AppError("User not found", ServiceErrorTypes.NOT_FOUND, 404);
     }
 
-    res.json(result.rows[0]);
+    res.json(successResponse(result.rows[0]));
   } catch (error) {
-    console.error("Get current user error:", error);
-    res.status(500).json({ message: "Error fetching user data" });
+    next(error);
   }
 };
 

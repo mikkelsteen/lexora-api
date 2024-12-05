@@ -14,6 +14,11 @@ const helmet = require("helmet");
 const pool = require("./db");
 const routes = require("./routes");
 const authConfig = require("./config/auth.config");
+const errorHandler = require("./middleware/error.middleware");
+const {
+  errorResponse,
+  ServiceErrorTypes,
+} = require("./utils/response.handler");
 
 const app = express();
 const PORT = process.env.PORT || 3002;
@@ -27,7 +32,10 @@ app.use(
         styleSrc: ["'self'", "'unsafe-inline'"],
         scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'"],
         imgSrc: ["'self'", "data:", "https:"],
-        connectSrc: ["'self'", "https://api.example.com"],
+        connectSrc: [
+          "'self'",
+          process.env.FRONTEND_URL || "http://localhost:3000",
+        ],
       },
     },
   })
@@ -64,6 +72,8 @@ app.use(
       secure: process.env.NODE_ENV === "production",
       sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
       httpOnly: true,
+      domain:
+        process.env.NODE_ENV === "production" ? ".yourdomain.com" : undefined,
     },
   })
 );
@@ -96,23 +106,15 @@ app.use("/api/", apiLimiter);
 // Routes
 app.use(routes);
 
-// Global error handling middleware
-app.use((err, req, res, next) => {
-  console.error(err.stack);
-  const errorResponse = {
-    message: "An unexpected error occurred",
-    ...(process.env.NODE_ENV === "development" && {
-      error: err.message,
-      stack: err.stack,
-    }),
-  };
-  res.status(500).json(errorResponse);
-});
-
 // Handle 404 errors
 app.use((req, res) => {
-  res.status(404).json({ message: "Resource not found" });
+  res
+    .status(404)
+    .json(errorResponse("Resource not found", ServiceErrorTypes.NOT_FOUND));
 });
+
+// Global error handling middleware
+app.use(errorHandler);
 
 // Start server
 app.listen(PORT, () => {

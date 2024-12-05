@@ -1,7 +1,12 @@
 const pool = require("../../db");
+const {
+  successResponse,
+  AppError,
+  ServiceErrorTypes,
+} = require("../../utils/response.handler");
 
 // Get standards
-const getStandards = async (req, res) => {
+const getStandards = async (req, res, next) => {
   try {
     const {
       organization_id,
@@ -9,44 +14,77 @@ const getStandards = async (req, res) => {
       search,
       page = 1,
       limit = 24,
-      sort_by = "issue_date", // Default to sorting by issue_date
-      sort_order = "desc", // Default to descending order
+      sort_by = "issue_date",
+      sort_order = "desc",
     } = req.query;
 
+    // Validate pagination parameters
+    const pageNum = parseInt(page, 10);
+    const limitNum = parseInt(limit, 10);
+    if (isNaN(pageNum) || pageNum < 1) {
+      throw new AppError(
+        "Invalid page number",
+        ServiceErrorTypes.VALIDATION_ERROR,
+        400
+      );
+    }
+    if (isNaN(limitNum) || limitNum < 1) {
+      throw new AppError(
+        "Invalid limit number",
+        ServiceErrorTypes.VALIDATION_ERROR,
+        400
+      );
+    }
+
     const conditions = [];
+    const params = [];
+    let paramCount = 1;
+
     if (organization_id) {
       conditions.push(
         `EXISTS (
           SELECT 1 FROM standards_organizations so 
           WHERE so.standard_id = standards.id 
-          AND so.organization_id = '${organization_id}'
+          AND so.organization_id = $${paramCount}
         )`
       );
+      params.push(organization_id);
+      paramCount++;
     }
     if (topic_id) {
       conditions.push(
         `EXISTS (
           SELECT 1 FROM standards_topics st 
           WHERE st.standard_id = standards.id 
-          AND st.topic_id = '${topic_id}'
+          AND st.topic_id = $${paramCount}
         )`
       );
+      params.push(topic_id);
+      paramCount++;
     }
     if (search) {
-      conditions.push(
-        `LOWER(standards.title) LIKE '%${search.toLowerCase()}%'`
-      );
+      conditions.push(`LOWER(standards.title) LIKE $${paramCount}`);
+      params.push(`%${search.toLowerCase()}%`);
+      paramCount++;
     }
 
-    // Validate sort_by and sort_order to avoid SQL injection
+    // Validate sort parameters
     const validSortColumns = ["issue_date", "title"];
     const validSortOrders = ["asc", "desc"];
-    const sortColumn = validSortColumns.includes(sort_by)
-      ? sort_by
-      : "issue_date";
-    const sortDirection = validSortOrders.includes(sort_order.toLowerCase())
-      ? sort_order.toUpperCase()
-      : "DESC";
+    if (!validSortColumns.includes(sort_by)) {
+      throw new AppError(
+        "Invalid sort column",
+        ServiceErrorTypes.VALIDATION_ERROR,
+        400
+      );
+    }
+    if (!validSortOrders.includes(sort_order.toLowerCase())) {
+      throw new AppError(
+        "Invalid sort order",
+        ServiceErrorTypes.VALIDATION_ERROR,
+        400
+      );
+    }
 
     // Fetch Standards with Related Data
     const query = `
@@ -77,11 +115,15 @@ const getStandards = async (req, res) => {
       LEFT JOIN topics 
         ON standards_topics.topic_id = topics.id
       GROUP BY fs.id, fs.title, fs.issue_date
-      ORDER BY fs.${sortColumn} ${sortDirection} NULLS LAST
-      LIMIT ${limit} OFFSET ${(page - 1) * limit};
+      ORDER BY fs.${sort_by} ${sort_order.toUpperCase()} NULLS LAST
+      LIMIT $${paramCount} OFFSET $${paramCount + 1}
     `;
 
-    const standards = await pool.query(query);
+    const standards = await pool.query(query, [
+      ...params,
+      limitNum,
+      (pageNum - 1) * limitNum,
+    ]);
 
     // Fetch Total Count
     const countQuery = `
@@ -90,32 +132,33 @@ const getStandards = async (req, res) => {
       ${conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : ""}
     `;
 
-    const totalItemsResult = await pool.query(countQuery);
-    const totalItems = totalItemsResult.rows[0]?.total || 0;
-    const totalPages = Math.ceil(totalItems / limit);
+    const totalItemsResult = await pool.query(countQuery, params);
+    const totalItems = parseInt(totalItemsResult.rows[0]?.total || 0);
+    const totalPages = Math.ceil(totalItems / limitNum);
 
-    // Format Response
-    res.json({
-      data: standards.rows.map((standard) => ({
-        ...standard,
-        issue_date: standard.issue_date
-          ? new Date(standard.issue_date).toISOString().split("T")[0]
-          : null,
-      })),
-      metadata: {
-        totalItems,
-        totalPages,
-        currentPage: parseInt(page, 10),
-      },
-    });
+    // Format and send response
+    res.json(
+      successResponse({
+        standards: standards.rows.map((standard) => ({
+          ...standard,
+          issue_date: standard.issue_date
+            ? new Date(standard.issue_date).toISOString().split("T")[0]
+            : null,
+        })),
+        metadata: {
+          totalItems,
+          totalPages,
+          currentPage: pageNum,
+        },
+      })
+    );
   } catch (error) {
-    console.error("Error fetching standards:", error);
-    res.status(500).json({ error: "Internal Server Error" });
+    next(error);
   }
 };
 
 // Create a new standard
-const createStandard = async (req, res) => {
+const createStandard = async (req, res, next) => {
   const {
     title,
     page_link,
@@ -128,7 +171,16 @@ const createStandard = async (req, res) => {
     file_name,
     downloaded,
   } = req.body;
+
   try {
+    if (!title) {
+      throw new AppError(
+        "Title is required",
+        ServiceErrorTypes.VALIDATION_ERROR,
+        400
+      );
+    }
+
     const newStandard = await pool.query(
       `INSERT INTO standards 
       (title, page_link, pdf_link, issue_date, closing_comment, status, docket_number, comment, file_name, downloaded) 
@@ -147,32 +199,71 @@ const createStandard = async (req, res) => {
         downloaded,
       ]
     );
-    res.status(201).json(newStandard.rows[0]);
-  } catch (err) {
-    console.error(err.message);
-    res.status(500).send("Server Error");
+
+    res
+      .status(201)
+      .json(
+        successResponse(newStandard.rows[0], "Standard created successfully")
+      );
+  } catch (error) {
+    next(error);
   }
 };
 
 // Get a standard by ID
-const getStandardById = async (req, res) => {
+const getStandardById = async (req, res, next) => {
   const { id } = req.params;
+
   try {
-    const standard = await pool.query("SELECT * FROM standards WHERE id = $1", [
-      id,
-    ]);
-    if (standard.rows.length === 0) {
-      return res.status(404).json({ msg: "Standard not found" });
+    if (!id) {
+      throw new AppError(
+        "Standard ID is required",
+        ServiceErrorTypes.VALIDATION_ERROR,
+        400
+      );
     }
-    res.json(standard.rows[0]);
-  } catch (err) {
-    console.error(err.message);
-    res.status(500).send("Server Error");
+
+    const standard = await pool.query(
+      `SELECT 
+        s.*,
+        COALESCE(
+          json_agg(DISTINCT jsonb_build_object('id', fda_organization.id, 'name', fda_organization.name))
+          FILTER (WHERE fda_organization.id IS NOT NULL), '[]'
+        ) AS organizations,
+        COALESCE(
+          json_agg(DISTINCT jsonb_build_object('id', topics.id, 'name', topics.name))
+          FILTER (WHERE topics.id IS NOT NULL), '[]'
+        ) AS topics
+      FROM standards s
+      LEFT JOIN standards_organizations 
+        ON s.id = standards_organizations.standard_id
+      LEFT JOIN fda_organization 
+        ON standards_organizations.organization_id = fda_organization.id
+      LEFT JOIN standards_topics 
+        ON s.id = standards_topics.standard_id
+      LEFT JOIN topics 
+        ON standards_topics.topic_id = topics.id
+      WHERE s.id = $1
+      GROUP BY s.id`,
+      [id]
+    );
+
+    if (standard.rows.length === 0) {
+      throw new AppError(
+        "Standard not found",
+        ServiceErrorTypes.NOT_FOUND,
+        404
+      );
+    }
+
+    res.json(successResponse(standard.rows[0]));
+  } catch (error) {
+    next(error);
   }
 };
 
 // Update a standard
-const updateStandard = async (req, res) => {
+const updateStandard = async (req, res, next) => {
   const { id } = req.params;
   const {
     title,
@@ -186,7 +277,23 @@ const updateStandard = async (req, res) => {
     file_name,
     downloaded,
   } = req.body;
+
   try {
+    if (!id) {
+      throw new AppError(
+        "Standard ID is required",
+        ServiceErrorTypes.VALIDATION_ERROR,
+        400
+      );
+    }
+    if (!title) {
+      throw new AppError(
+        "Title is required",
+        ServiceErrorTypes.VALIDATION_ERROR,
+        400
+      );
+    }
+
     const updatedStandard = await pool.query(
       `UPDATE standards 
       SET title = $1, page_link = $2, pdf_link = $3, issue_date = $4, closing_comment = $5, status = $6, docket_number = $7, 
@@ -206,34 +313,57 @@ const updateStandard = async (req, res) => {
         id,
       ]
     );
+
     if (updatedStandard.rows.length === 0) {
-      return res.status(404).json({ msg: "Standard not found" });
+      throw new AppError(
+        "Standard not found",
+        ServiceErrorTypes.NOT_FOUND,
+        404
+      );
     }
-    res.json(updatedStandard.rows[0]);
-  } catch (err) {
-    console.error(err.message);
-    res.status(500).send("Server Error");
+
+    res.json(
+      successResponse(updatedStandard.rows[0], "Standard updated successfully")
+    );
+  } catch (error) {
+    next(error);
   }
 };
 
 // Delete a standard
-const deleteStandard = async (req, res) => {
+const deleteStandard = async (req, res, next) => {
   const { id } = req.params;
+
   try {
+    if (!id) {
+      throw new AppError(
+        "Standard ID is required",
+        ServiceErrorTypes.VALIDATION_ERROR,
+        400
+      );
+    }
+
     const deletedStandard = await pool.query(
       "DELETE FROM standards WHERE id = $1 RETURNING *",
       [id]
     );
+
     if (deletedStandard.rows.length === 0) {
-      return res.status(404).json({ msg: "Standard not found" });
+      throw new AppError(
+        "Standard not found",
+        ServiceErrorTypes.NOT_FOUND,
+        404
+      );
     }
-    res.json({
-      msg: "Standard deleted",
-      deletedStandard: deletedStandard.rows[0],
-    });
-  } catch (err) {
-    console.error(err.message);
-    res.status(500).send("Server Error");
+
+    res.json(
+      successResponse(
+        { deletedStandard: deletedStandard.rows[0] },
+        "Standard deleted successfully"
+      )
+    );
+  } catch (error) {
+    next(error);
   }
 };
 

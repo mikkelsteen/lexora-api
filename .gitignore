@@ -96,8 +96,6 @@ build/Release/
 # Yarn Integrity file
 .yarn-integrity
 
-# dotenv environment variable files
-.env.*
 
 # Assets that should be ignored
 assets/standards/*

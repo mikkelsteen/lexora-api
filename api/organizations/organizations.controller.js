@@ -1,11 +1,24 @@
 const pool = require("../../db");
+const {
+  successResponse,
+  AppError,
+  ServiceErrorTypes,
+} = require("../../utils/response.handler");
 
 // Create organization
-const createOrganization = async (req, res) => {
+const createOrganization = async (req, res, next) => {
   const { name } = req.body;
   const client = await pool.connect();
 
   try {
+    if (!name) {
+      throw new AppError(
+        "Organization name is required",
+        ServiceErrorTypes.VALIDATION_ERROR,
+        400
+      );
+    }
+
     await client.query("BEGIN");
 
     // Create organization
@@ -21,18 +34,29 @@ const createOrganization = async (req, res) => {
     ]);
 
     await client.query("COMMIT");
-    res.json(orgResult.rows[0]);
+    res.json(
+      successResponse(orgResult.rows[0], "Organization created successfully")
+    );
   } catch (error) {
     await client.query("ROLLBACK");
-    console.error("Create organization error:", error);
-    res.status(500).json({ message: "Error creating organization" });
+    if (error.code === "23505") {
+      next(
+        new AppError(
+          "Organization with this name already exists",
+          ServiceErrorTypes.VALIDATION_ERROR,
+          400
+        )
+      );
+    } else {
+      next(error);
+    }
   } finally {
     client.release();
   }
 };
 
 // Get organization details
-const getOrganization = async (req, res) => {
+const getOrganization = async (req, res, next) => {
   try {
     const result = await pool.query(
       `
@@ -60,35 +84,65 @@ const getOrganization = async (req, res) => {
     );
 
     if (result.rows.length === 0) {
-      return res.status(404).json({ message: "Organization not found" });
+      throw new AppError(
+        "Organization not found",
+        ServiceErrorTypes.NOT_FOUND,
+        404
+      );
     }
 
-    res.json(result.rows[0]);
+    res.json(successResponse(result.rows[0]));
   } catch (error) {
-    console.error("Get organization error:", error);
-    res.status(500).json({ message: "Error fetching organization" });
+    next(error);
   }
 };
 
 // Update organization
-const updateOrganization = async (req, res) => {
+const updateOrganization = async (req, res, next) => {
   const { name } = req.body;
 
   try {
+    if (!name) {
+      throw new AppError(
+        "Organization name is required",
+        ServiceErrorTypes.VALIDATION_ERROR,
+        400
+      );
+    }
+
     const result = await pool.query(
       "UPDATE organizations SET name = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 RETURNING *",
       [name, req.organizationId]
     );
 
-    res.json(result.rows[0]);
+    if (result.rows.length === 0) {
+      throw new AppError(
+        "Organization not found",
+        ServiceErrorTypes.NOT_FOUND,
+        404
+      );
+    }
+
+    res.json(
+      successResponse(result.rows[0], "Organization updated successfully")
+    );
   } catch (error) {
-    console.error("Update organization error:", error);
-    res.status(500).json({ message: "Error updating organization" });
+    if (error.code === "23505") {
+      next(
+        new AppError(
+          "Organization with this name already exists",
+          ServiceErrorTypes.VALIDATION_ERROR,
+          400
+        )
+      );
+    } else {
+      next(error);
+    }
   }
 };
 
 // Get organization members
-const getMembers = async (req, res) => {
+const getMembers = async (req, res, next) => {
   try {
     const result = await pool.query(
       `
@@ -108,83 +162,169 @@ const getMembers = async (req, res) => {
       [req.organizationId]
     );
 
-    res.json(result.rows);
+    res.json(successResponse(result.rows));
   } catch (error) {
-    console.error("Get members error:", error);
-    res.status(500).json({ message: "Error fetching members" });
+    next(error);
   }
 };
 
 // Create team
-const createTeam = async (req, res) => {
+const createTeam = async (req, res, next) => {
   const { name } = req.body;
 
   try {
+    if (!name) {
+      throw new AppError(
+        "Team name is required",
+        ServiceErrorTypes.VALIDATION_ERROR,
+        400
+      );
+    }
+
     const result = await pool.query(
       "INSERT INTO teams (organization_id, name) VALUES ($1, $2) RETURNING *",
       [req.organizationId, name]
     );
 
-    res.json(result.rows[0]);
+    res.json(successResponse(result.rows[0], "Team created successfully"));
   } catch (error) {
-    console.error("Create team error:", error);
-    res.status(500).json({ message: "Error creating team" });
+    if (error.code === "23505") {
+      next(
+        new AppError(
+          "Team with this name already exists",
+          ServiceErrorTypes.VALIDATION_ERROR,
+          400
+        )
+      );
+    } else {
+      next(error);
+    }
   }
 };
 
 // Update team
-const updateTeam = async (req, res) => {
+const updateTeam = async (req, res, next) => {
   const { teamId } = req.params;
   const { name } = req.body;
 
   try {
+    if (!teamId) {
+      throw new AppError(
+        "Team ID is required",
+        ServiceErrorTypes.VALIDATION_ERROR,
+        400
+      );
+    }
+    if (!name) {
+      throw new AppError(
+        "Team name is required",
+        ServiceErrorTypes.VALIDATION_ERROR,
+        400
+      );
+    }
+
     const result = await pool.query(
       "UPDATE teams SET name = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 AND organization_id = $3 RETURNING *",
       [name, teamId, req.organizationId]
     );
 
     if (result.rows.length === 0) {
-      return res.status(404).json({ message: "Team not found" });
+      throw new AppError("Team not found", ServiceErrorTypes.NOT_FOUND, 404);
     }
 
-    res.json(result.rows[0]);
+    res.json(successResponse(result.rows[0], "Team updated successfully"));
   } catch (error) {
-    console.error("Update team error:", error);
-    res.status(500).json({ message: "Error updating team" });
+    if (error.code === "23505") {
+      next(
+        new AppError(
+          "Team with this name already exists",
+          ServiceErrorTypes.VALIDATION_ERROR,
+          400
+        )
+      );
+    } else {
+      next(error);
+    }
   }
 };
 
 // Delete team
-const deleteTeam = async (req, res) => {
+const deleteTeam = async (req, res, next) => {
   const { teamId } = req.params;
 
   try {
-    await pool.query(
-      "DELETE FROM teams WHERE id = $1 AND organization_id = $2",
+    if (!teamId) {
+      throw new AppError(
+        "Team ID is required",
+        ServiceErrorTypes.VALIDATION_ERROR,
+        400
+      );
+    }
+
+    const result = await pool.query(
+      "DELETE FROM teams WHERE id = $1 AND organization_id = $2 RETURNING *",
       [teamId, req.organizationId]
     );
 
-    res.json({ message: "Team deleted successfully" });
+    if (result.rows.length === 0) {
+      throw new AppError("Team not found", ServiceErrorTypes.NOT_FOUND, 404);
+    }
+
+    res.json(successResponse(null, "Team deleted successfully"));
   } catch (error) {
-    console.error("Delete team error:", error);
-    res.status(500).json({ message: "Error deleting team" });
+    if (error.code === "23503") {
+      next(
+        new AppError(
+          "Cannot delete team that has members",
+          ServiceErrorTypes.VALIDATION_ERROR,
+          400
+        )
+      );
+    } else {
+      next(error);
+    }
   }
 };
 
 // Manage team members
-const manageTeamMembers = async (req, res) => {
+const manageTeamMembers = async (req, res, next) => {
   const { teamId } = req.params;
   const { userIds } = req.body;
   const client = await pool.connect();
 
   try {
+    if (!teamId) {
+      throw new AppError(
+        "Team ID is required",
+        ServiceErrorTypes.VALIDATION_ERROR,
+        400
+      );
+    }
+    if (!Array.isArray(userIds)) {
+      throw new AppError(
+        "User IDs must be an array",
+        ServiceErrorTypes.VALIDATION_ERROR,
+        400
+      );
+    }
+
     await client.query("BEGIN");
+
+    // Verify team exists and belongs to organization
+    const teamResult = await client.query(
+      "SELECT id FROM teams WHERE id = $1 AND organization_id = $2",
+      [teamId, req.organizationId]
+    );
+
+    if (teamResult.rows.length === 0) {
+      throw new AppError("Team not found", ServiceErrorTypes.NOT_FOUND, 404);
+    }
 
     // Remove existing members
     await client.query("DELETE FROM team_members WHERE team_id = $1", [teamId]);
 
     // Add new members
-    if (userIds && userIds.length > 0) {
+    if (userIds.length > 0) {
       const values = userIds.map((userId) => `($1, '${userId}')`).join(",");
       await client.query(
         `
@@ -196,11 +336,10 @@ const manageTeamMembers = async (req, res) => {
     }
 
     await client.query("COMMIT");
-    res.json({ message: "Team members updated successfully" });
+    res.json(successResponse(null, "Team members updated successfully"));
   } catch (error) {
     await client.query("ROLLBACK");
-    console.error("Manage team members error:", error);
-    res.status(500).json({ message: "Error managing team members" });
+    next(error);
   } finally {
     client.release();
   }
